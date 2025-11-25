@@ -1,979 +1,424 @@
 #include <stdio.h>
-#include <string.h>
 #include <stdlib.h>
+#include <string.h>
 #include <stdbool.h>
-#include <stdint.h>
 #include <ctype.h>
 
-#define func void
+// Types
 
-typedef struct {
-    int id;
-    char name[30];
-} Object;
+typedef enum {
+    TOK_EOF, TOK_ID, TOK_NUM, TOK_STR,
+    TOK_PLUS, TOK_MINUS, TOK_STAR, TOK_SLASH,
+    TOK_LT, TOK_GT, TOK_EQEQ, TOK_NEQ,
+    TOK_EQ, 
+    TOK_LPAREN, TOK_RPAREN, TOK_LBRACE, TOK_RBRACE, 
+    TOK_COMMA, TOK_SEMICOLON,
+    TOK_KW_FUNC, TOK_KW_SHOW, TOK_KW_IF, TOK_KW_ELSE, 
+    TOK_KW_RETURN, TOK_KW_WHILE, TOK_KW_FOR, TOK_KW_IMPORT
+} TokenType;
 
-typedef struct {
-    Object *items;
-    int size;
-    int capacity;
-} ObjectList;
+typedef struct { TokenType type; char* value; int line; } Token;
+typedef struct { char* src; int pos; int line; } Lexer;
 
-typedef uint8_t Byte;
+typedef enum {
+    NODE_PROG, NODE_BLOCK,
+    NODE_FUNC_DEF, NODE_FUNC_CALL, NODE_IMPORT,
+    NODE_IF, NODE_WHILE, NODE_FOR, NODE_RETURN,
+    NODE_ASSIGN, NODE_BIN_OP,
+    NODE_NUM, NODE_STR, NODE_ID, NODE_SHOW
+} NodeType;
 
-typedef struct {
-    char name[50];
-    union {
-        Byte byte_value;
-        int int_value;
-        float float_value;
-        char str_value[100];
-    } value;
-    char type[20];
-} Variable;
+typedef struct ASTNode {
+    NodeType type;
+    struct ASTNode *left, *right, *extra;
+    char* value;
+} ASTNode;
 
-typedef struct {
-    char name[50];
-    char params[100];
-    char body[500];
-} ClassMethod;
+typedef struct { Lexer* l; Token* curr; } Parser;
 
-typedef struct {
-    char name[50];
-    ClassMethod methods[20];
-    int method_count;
-    Variable attributes[20];
-    int attribute_count;
-} Class;
+// Lexer
 
-typedef struct {
-    char name[50];
-    char params[100];
-    char body[500];
-} Function;
-
-Variable variables[100];
-int variable_count = 0;
-
-Class classes[20];
-int class_count = 0;
-
-Function functions[20];
-int function_count = 0;
-
-ObjectList* object_lists[20];
-int object_list_count = 0;
-
-ObjectList* create_object_list(int capacity) {
-    ObjectList *list = malloc(sizeof(ObjectList));
-    list->capacity = capacity;
-    list->size = 0;
-    list->items = malloc(sizeof(Object) * capacity);
-    return list;
+Lexer* create_lexer(char* src) {
+    Lexer* l = malloc(sizeof(Lexer)); l->src = src; l->pos = 0; l->line = 1; return l;
 }
 
-void add_object(ObjectList *list, int id, const char *name) {
-    if (list->size >= list->capacity) {
-        list->capacity *= 2;
-        list->items = realloc(list->items, sizeof(Object) * list->capacity);
+Token* mk_tok(TokenType t, char* v, int l) {
+    Token* tok = malloc(sizeof(Token)); tok->type=t; tok->value=v?strdup(v):NULL; tok->line=l; return tok;
+}
+
+TokenType get_kw(char* s) {
+    if(!strcmp(s,"func")) return TOK_KW_FUNC;
+    if(!strcmp(s,"show")) return TOK_KW_SHOW;
+    if(!strcmp(s,"return")) return TOK_KW_RETURN;
+    if(!strcmp(s,"if")) return TOK_KW_IF;
+    if(!strcmp(s,"else")) return TOK_KW_ELSE;
+    if(!strcmp(s,"while")) return TOK_KW_WHILE;
+    if(!strcmp(s,"for")) return TOK_KW_FOR;
+    if(!strcmp(s,"import")) return TOK_KW_IMPORT;
+    return TOK_ID;
+}
+
+Token* next_tok(Lexer* l) {
+    while(l->src[l->pos]) {
+        char c = l->src[l->pos];
+        if(isspace(c)) { if(c=='\n') l->line++; l->pos++; continue; }
+        // Комментарии //
+        if(c=='/' && l->src[l->pos+1]=='/') { 
+            while(l->src[l->pos] && l->src[l->pos]!='\n') l->pos++; 
+            continue; 
+        }
+        break;
     }
-    Object obj;
-    obj.id = id;
-    strncpy(obj.name, name, sizeof(obj.name) - 1);
-    obj.name[sizeof(obj.name) - 1] = '\0';
-    list->items[list->size] = obj;
-    list->size++;
+    if(!l->src[l->pos]) return mk_tok(TOK_EOF, 0, l->line);
+
+    char c = l->src[l->pos];
+    if(isalpha(c) || c=='_') {
+        int start = l->pos;
+        while(isalnum(l->src[l->pos]) || l->src[l->pos]=='_') l->pos++;
+        int len = l->pos - start;
+        char* v = malloc(len+1); strncpy(v, l->src+start, len); v[len]=0;
+        return mk_tok(get_kw(v), v, l->line);
+    }
+    if(isdigit(c)) {
+        int start = l->pos;
+        while(isdigit(l->src[l->pos])) l->pos++;
+        char* v = malloc(l->pos - start + 1); strncpy(v, l->src+start, l->pos-start); v[l->pos-start]=0;
+        return mk_tok(TOK_NUM, v, l->line);
+    }
+    if(c=='"' || c=='\'') {
+        char q=c; l->pos++; int start=l->pos;
+        while(l->src[l->pos] && l->src[l->pos]!=q) { if(l->src[l->pos]=='\n') l->line++; l->pos++; }
+        char* v = malloc(l->pos - start + 1); strncpy(v, l->src+start, l->pos-start); v[l->pos-start]=0;
+        if(l->src[l->pos]==q) l->pos++; 
+        return mk_tok(TOK_STR, v, l->line);
+    }
+
+    l->pos++;
+    switch(c) {
+        case '+': return mk_tok(TOK_PLUS, "+", l->line);
+        case '-': return mk_tok(TOK_MINUS, "-", l->line);
+        case '*': return mk_tok(TOK_STAR, "*", l->line);
+        case '/': return mk_tok(TOK_SLASH, "/", l->line);
+        case '(': return mk_tok(TOK_LPAREN, "(", l->line);
+        case ')': return mk_tok(TOK_RPAREN, ")", l->line);
+        case '{': return mk_tok(TOK_LBRACE, "{", l->line);
+        case '}': return mk_tok(TOK_RBRACE, "}", l->line);
+        case ';': return mk_tok(TOK_SEMICOLON, ";", l->line);
+        case ',': return mk_tok(TOK_COMMA, ",", l->line);
+        case '<': return mk_tok(TOK_LT, "<", l->line);
+        case '>': return mk_tok(TOK_GT, ">", l->line);
+        case '!': if(l->src[l->pos]=='=') { l->pos++; return mk_tok(TOK_NEQ, "!=", l->line); } break;
+        case '=': if(l->src[l->pos]=='=') { l->pos++; return mk_tok(TOK_EQEQ, "==", l->line); }
+                  return mk_tok(TOK_EQ, "=", l->line);
+    }
+    printf("Lexer Error: Unknown char '%c' at line %d\n", c, l->line); exit(1);
 }
 
-void clear_object_list(ObjectList *list) {
-    free(list->items);
-    free(list);
+// Parser
+
+ASTNode* mk_node(NodeType t, ASTNode* l, ASTNode* r, ASTNode* x, char* v) {
+    ASTNode* n = malloc(sizeof(ASTNode)); n->type=t; n->left=l; n->right=r; n->extra=x; n->value=v?strdup(v):NULL; return n;
 }
 
-void show(const char *text) {
-    printf("%s\n", text);
+Parser* create_parser(Lexer* l) { Parser* p=malloc(sizeof(Parser)); p->l=l; p->curr=next_tok(l); return p; }
+
+void eat(Parser* p, TokenType t) {
+    if(p->curr->type == t) { if(p->curr->value) free(p->curr->value); free(p->curr); p->curr=next_tok(p->l); }
+    else { printf("Syntax Error line %d: expected %d got %d val='%s'\n", p->curr->line, t, p->curr->type, p->curr->value); exit(1); }
 }
 
-char* get_inp(const char *message, const char *prompt) {
-    printf("%s\n", message);
-    printf("%s", prompt);
-    fflush(stdout);
+ASTNode* parse_expr(Parser* p);
+ASTNode* parse_block(Parser* p);
+
+ASTNode* parse_primary(Parser* p) {
+    if(p->curr->type==TOK_NUM) { ASTNode* n=mk_node(NODE_NUM,0,0,0,p->curr->value); eat(p,TOK_NUM); return n; }
+    if(p->curr->type==TOK_STR) { ASTNode* n=mk_node(NODE_STR,0,0,0,p->curr->value); eat(p,TOK_STR); return n; }
+    if(p->curr->type==TOK_ID) {
+        char* name = strdup(p->curr->value); eat(p,TOK_ID);
+        if(p->curr->type==TOK_LPAREN) { // Function call
+            eat(p,TOK_LPAREN); ASTNode* args=NULL, *curr=NULL;
+            while(p->curr->type!=TOK_RPAREN) {
+                ASTNode* expr = parse_expr(p);
+                ASTNode* arg = mk_node(NODE_BLOCK, expr, NULL, NULL, NULL); 
+                if(!args) args=arg; else curr->right=arg; curr=arg;
+                if(p->curr->type==TOK_COMMA) eat(p,TOK_COMMA);
+            }
+            eat(p,TOK_RPAREN); return mk_node(NODE_FUNC_CALL, args, NULL, NULL, name);
+        }
+        return mk_node(NODE_ID,0,0,0,name);
+    }
+    if(p->curr->type==TOK_LPAREN) { eat(p,TOK_LPAREN); ASTNode* e=parse_expr(p); eat(p,TOK_RPAREN); return e; }
+    return NULL;
+}
+
+ASTNode* parse_term(Parser* p) {
+    ASTNode* left = parse_primary(p);
+    while(p->curr->type == TOK_STAR || p->curr->type == TOK_SLASH) {
+        char* op = strdup(p->curr->value); eat(p, p->curr->type);
+        left = mk_node(NODE_BIN_OP, left, parse_primary(p), NULL, op);
+        free(op);
+    }
+    return left;
+}
+
+ASTNode* parse_additive(Parser* p) {
+    ASTNode* left = parse_term(p);
+    while(p->curr->type == TOK_PLUS || p->curr->type == TOK_MINUS) {
+        char* op = strdup(p->curr->value); eat(p, p->curr->type);
+        left = mk_node(NODE_BIN_OP, left, parse_term(p), NULL, op);
+        free(op);
+    }
+    return left;
+}
+
+ASTNode* parse_relational(Parser* p) {
+    ASTNode* left = parse_additive(p);
+    while(p->curr->type == TOK_LT || p->curr->type == TOK_GT) {
+        char* op = strdup(p->curr->value); eat(p, p->curr->type);
+        left = mk_node(NODE_BIN_OP, left, parse_additive(p), NULL, op);
+        free(op);
+    }
+    return left;
+}
+
+ASTNode* parse_expr(Parser* p) {
+    ASTNode* left = parse_relational(p);
+    while(p->curr->type == TOK_EQEQ || p->curr->type == TOK_NEQ) {
+        char* op = strdup(p->curr->value); eat(p, p->curr->type);
+        left = mk_node(NODE_BIN_OP, left, parse_relational(p), NULL, op);
+        free(op);
+    }
+    if(left && left->type==NODE_ID && p->curr->type==TOK_EQ) {
+        char* name = strdup(left->value); eat(p,TOK_EQ);
+        return mk_node(NODE_ASSIGN, NULL, parse_expr(p), NULL, name);
+    }
+    return left;
+}
+
+ASTNode* parse_import(Parser* p) {
+    eat(p, TOK_KW_IMPORT);
+    char* path = strdup(p->curr->value); eat(p, TOK_STR); eat(p, TOK_SEMICOLON);
+    return mk_node(NODE_IMPORT, NULL, NULL, NULL, path);
+}
+
+ASTNode* parse_block(Parser* p) {
+    eat(p, TOK_LBRACE);
+    ASTNode *head=NULL, *curr=NULL;
+    while(p->curr->type!=TOK_RBRACE && p->curr->type!=TOK_EOF) {
+        ASTNode* stmt = NULL;
+        if(p->curr->type==TOK_KW_SHOW) { eat(p,TOK_KW_SHOW); eat(p,TOK_LPAREN); stmt=mk_node(NODE_SHOW, parse_expr(p),0,0,0); eat(p,TOK_RPAREN); }
+        else if(p->curr->type==TOK_KW_IF) {
+            eat(p,TOK_KW_IF); eat(p,TOK_LPAREN); ASTNode* c=parse_expr(p); eat(p,TOK_RPAREN);
+            ASTNode* th=parse_block(p);
+            ASTNode* el=(p->curr->type==TOK_KW_ELSE)?(eat(p,TOK_KW_ELSE),parse_block(p)):NULL;
+            stmt=mk_node(NODE_IF,c,th,el,NULL);
+        }
+        else if(p->curr->type==TOK_KW_WHILE) {
+            eat(p,TOK_KW_WHILE); eat(p,TOK_LPAREN); ASTNode* c=parse_expr(p); eat(p,TOK_RPAREN);
+            stmt=mk_node(NODE_WHILE,c,parse_block(p),0,0);
+        }
+        else if(p->curr->type==TOK_KW_FOR) {
+            eat(p,TOK_KW_FOR); eat(p,TOK_LPAREN);
+            ASTNode* init=parse_expr(p); eat(p,TOK_SEMICOLON);
+            ASTNode* cond=parse_expr(p); eat(p,TOK_SEMICOLON);
+            ASTNode* step=parse_expr(p); eat(p,TOK_RPAREN);
+            stmt=mk_node(NODE_FOR, init, cond, mk_node(NODE_BLOCK, step, parse_block(p),0,0), NULL);
+        }
+        else if(p->curr->type==TOK_KW_RETURN) {
+            eat(p,TOK_KW_RETURN); stmt=mk_node(NODE_RETURN, (p->curr->type!=TOK_SEMICOLON)?parse_expr(p):0,0,0,0);
+        }
+        else if(p->curr->type==TOK_KW_IMPORT) stmt = parse_import(p);
+        else stmt = parse_expr(p);
+        ASTNode* n = mk_node(NODE_BLOCK, stmt, NULL, NULL, NULL);
+        if(!head) head=n; else curr->right=n; curr=n;
+        if(p->curr->type==TOK_SEMICOLON) eat(p,TOK_SEMICOLON);
+    }
+    eat(p, TOK_RBRACE);
+    return head;
+}
+
+ASTNode* parse_prog(Parser* p) {
+    ASTNode *head=NULL, *curr=NULL;
+    while(p->curr->type!=TOK_EOF) {
+        ASTNode* stmt = NULL;
+        if(p->curr->type==TOK_KW_FUNC) {
+            eat(p,TOK_KW_FUNC); char* n=strdup(p->curr->value); eat(p,TOK_ID); eat(p,TOK_LPAREN);
+            ASTNode *params=NULL, *pc=NULL;
+            while(p->curr->type!=TOK_RPAREN) {
+                ASTNode* pa = mk_node(NODE_ID,0,0,0,p->curr->value); eat(p,TOK_ID);
+                if(!params) params=pa; else pc->right=pa; pc=pa;
+                if(p->curr->type==TOK_COMMA) eat(p,TOK_COMMA);
+            }
+            eat(p,TOK_RPAREN);
+            stmt = mk_node(NODE_FUNC_DEF, params, NULL, parse_block(p), n);
+        } else if(p->curr->type==TOK_KW_IMPORT) {
+            stmt = parse_import(p);
+        } else {
+            if(p->curr->type==TOK_KW_SHOW) { eat(p,TOK_KW_SHOW); eat(p,TOK_LPAREN); stmt=mk_node(NODE_SHOW, parse_expr(p),0,0,0); eat(p,TOK_RPAREN); }
+            else stmt = parse_expr(p);
+        }
+        ASTNode* n = mk_node(NODE_PROG, stmt, NULL, NULL, NULL);
+        if(!head) head=n; else curr->right=n; curr=n;
+        if(p->curr->type==TOK_SEMICOLON) eat(p,TOK_SEMICOLON);
+    }
+    return head;
+}
+
+// VM
+
+typedef enum { VAL_NUM, VAL_STR, VAL_FUNC } ValType;
+typedef struct { ValType type; union { int n; char* s; ASTNode* f; } as; } Value;
+typedef struct { char* name; Value val; } Var;
+typedef struct { Var* vars; int cnt; int cap; } Scope;
+typedef struct { Scope* scopes; int sc_cnt; bool is_ret; Value ret_val; } VM;
+
+Value mk_num(int n) { Value v={VAL_NUM, .as.n=n}; return v; }
+Value mk_str(char* s) { Value v={VAL_STR, .as.s=strdup(s)}; return v; }
+
+VM* create_vm() {
+    VM* vm = malloc(sizeof(VM)); vm->scopes=malloc(sizeof(Scope)*100);
+    vm->scopes[0].vars=malloc(sizeof(Var)*100); vm->scopes[0].cnt=0; vm->scopes[0].cap=100;
+    vm->sc_cnt=1; vm->is_ret=false;
+    return vm;
+}
+
+void set_var(VM* vm, char* n, Value v) {
+    Scope* s = &vm->scopes[vm->sc_cnt-1];
+    for(int i=0; i<s->cnt; i++) if(!strcmp(s->vars[i].name, n)) { s->vars[i].val=v; return; }
+    if(s->cnt >= s->cap) { s->cap*=2; s->vars=realloc(s->vars, sizeof(Var)*s->cap); }
+    s->vars[s->cnt].name=strdup(n); s->vars[s->cnt].val=v; s->cnt++;
+}
+
+void set_global(VM* vm, char* n, Value v) {
+    Scope* s = &vm->scopes[0];
+    for(int i=0; i<s->cnt; i++) if(!strcmp(s->vars[i].name, n)) { s->vars[i].val=v; return; }
+    if(s->cnt >= s->cap) { s->cap*=2; s->vars=realloc(s->vars, sizeof(Var)*s->cap); }
+    s->vars[s->cnt].name=strdup(n); s->vars[s->cnt].val=v; s->cnt++;
+}
+
+Value get_var(VM* vm, char* n) {
+    for(int k=vm->sc_cnt-1; k>=0; k--) 
+        for(int i=0; i<vm->scopes[k].cnt; i++) 
+            if(!strcmp(vm->scopes[k].vars[i].name, n)) {
+                Value v=vm->scopes[k].vars[i].val;
+                return v.type==VAL_STR ? mk_str(v.as.s) : v;
+            }
+    printf("Runtime Error: Variable '%s' not found\n", n); exit(1);
+}
+
+char* read_file(const char* f) {
+    FILE* file = fopen(f, "rb"); if(!file) return NULL;
+    fseek(file,0,SEEK_END); long len=ftell(file); fseek(file,0,SEEK_SET);
+    char* s=malloc(len+1); fread(s,1,len,file); s[len]=0; fclose(file);
+    return s;
+}
+
+void run_block(void* vm_ptr, ASTNode* n);
+ASTNode* parse_prog(Parser* p);
+
+void exec_import(VM* vm, char* path) {
+    char* src = read_file(path);
+    if(!src) { printf("Error: Could not import '%s'\n", path); exit(1); }
+    Lexer* l = create_lexer(src);
+    Parser* p = create_parser(l);
+    ASTNode* prog = parse_prog(p);
+    run_block(vm, prog);
+    free(src);
+}
+
+Value eval(VM* vm, ASTNode* n) {
+    if(!n) return mk_num(0);
+    if(n->type==NODE_NUM) return mk_num(atoi(n->value));
+    if(n->type==NODE_STR) return mk_str(n->value);
+    if(n->type==NODE_ID) return get_var(vm, n->value);
     
-    char *buffer = malloc(100 * sizeof(char));
-    if (buffer == NULL) {
-        perror("Memory allocation failed");
-        return NULL;
-    }
-
-    if (fgets(buffer, 100, stdin) == NULL) {
-        free(buffer);
-        return NULL;
-    }
-
-    buffer[strcspn(buffer, "\n")] = '\0';
-    return buffer;
-}
-
-Byte get_byte(const char *value) {
-    int int_value = atoi(value);
-    return (Byte)(int_value & 0xFF);
-}
-
-void set_variable(const char *name, int value, const char *type) {
-    for (int i = 0; i < variable_count; i++) {
-        if (strcmp(variables[i].name, name) == 0) {
-            if (strcmp(type, "byte") == 0) {
-                variables[i].value.byte_value = (Byte)value;
-            } else if (strcmp(type, "int") == 0) {
-                variables[i].value.int_value = value;
-            }
-            return;
-        }
-    }
-
-    if (variable_count < 100) {
-        strncpy(variables[variable_count].name, name, sizeof(variables[variable_count].name) - 1);
-        variables[variable_count].name[sizeof(variables[variable_count].name) - 1] = '\0';
-
-        if (strcmp(type, "byte") == 0) {
-            variables[variable_count].value.byte_value = (Byte)value;
-            strncpy(variables[variable_count].type, "byte", sizeof(variables[variable_count].type) - 1);
-        } else if (strcmp(type, "int") == 0) {
-            variables[variable_count].value.int_value = value;
-            strncpy(variables[variable_count].type, "int", sizeof(variables[variable_count].type) - 1);
-        }
-        variable_count++;
-    }
-}
-
-void set_variable_string(const char *name, const char *value) {
-    for (int i = 0; i < variable_count; i++) {
-        if (strcmp(variables[i].name, name) == 0) {
-            strncpy(variables[i].value.str_value, value, sizeof(variables[i].value.str_value) - 1);
-            variables[i].value.str_value[sizeof(variables[i].value.str_value) - 1] = '\0';
-            strncpy(variables[i].type, "string", sizeof(variables[i].type) - 1);
-            return;
-        }
-    }
-
-    if (variable_count < 100) {
-        strncpy(variables[variable_count].name, name, sizeof(variables[variable_count].name) - 1);
-        variables[variable_count].name[sizeof(variables[variable_count].name) - 1] = '\0';
-        
-        strncpy(variables[variable_count].value.str_value, value, sizeof(variables[variable_count].value.str_value) - 1);
-        variables[variable_count].value.str_value[sizeof(variables[variable_count].value.str_value) - 1] = '\0';
-        strncpy(variables[variable_count].type, "string", sizeof(variables[variable_count].type) - 1);
-        
-        variable_count++;
-    }
-}
-
-int get_variable_int(const char *name) {
-    for (int i = 0; i < variable_count; i++) {
-        if (strcmp(variables[i].name, name) == 0) {
-            if (strcmp(variables[i].type, "byte") == 0) {
-                return variables[i].value.byte_value;
-            } else if (strcmp(variables[i].type, "int") == 0) {
-                return variables[i].value.int_value;
-            }
-        }
-    }
-    return 0;
-}
-
-const char* get_variable_string(const char *name) {
-    for (int i = 0; i < variable_count; i++) {
-        if (strcmp(variables[i].name, name) == 0) {
-            if (strcmp(variables[i].type, "string") == 0) {
-                return variables[i].value.str_value;
-            } else if (strcmp(variables[i].type, "int") == 0) {
-                static char buffer[20];
-                snprintf(buffer, sizeof(buffer), "%d", variables[i].value.int_value);
-                return buffer;
-            }
-        }
-    }
-    return "";
-}
-
-void add_class(const char *name) {
-    if (class_count < 20) {
-        strncpy(classes[class_count].name, name, sizeof(classes[class_count].name) - 1);
-        classes[class_count].name[sizeof(classes[class_count].name) - 1] = '\0';
-        classes[class_count].method_count = 0;
-        classes[class_count].attribute_count = 0;
-        class_count++;
-    }
-}
-
-void add_class_method(const char *class_name, const char *method_name, const char *method_params, const char *method_body) {
-    for (int i = 0; i < class_count; i++) {
-        if (strcmp(classes[i].name, class_name) == 0) {
-            if (classes[i].method_count < 20) {
-                strncpy(classes[i].methods[classes[i].method_count].name, method_name,
-                        sizeof(classes[i].methods[classes[i].method_count].name) - 1);
-                classes[i].methods[classes[i].method_count].name[sizeof(classes[i].methods[classes[i].method_count].name) - 1] = '\0';
-
-                if (method_params) {
-                    strncpy(classes[i].methods[classes[i].method_count].params, method_params,
-                            sizeof(classes[i].methods[classes[i].method_count].params) - 1);
-                    classes[i].methods[classes[i].method_count].params[sizeof(classes[i].methods[classes[i].method_count].params) - 1] = '\0';
-                }
-
-                strncpy(classes[i].methods[classes[i].method_count].body, method_body,
-                        sizeof(classes[i].methods[classes[i].method_count].body) - 1);
-                classes[i].methods[classes[i].method_count].body[sizeof(classes[i].methods[classes[i].method_count].body) - 1] = '\0';
-
-                classes[i].method_count++;
-            }
-            return;
-        }
-    }
-}
-
-void add_function(const char *func_name, const char *func_params, const char *func_body) {
-    if (function_count < 20) {
-        strncpy(functions[function_count].name, func_name, sizeof(functions[function_count].name) - 1);
-        functions[function_count].name[sizeof(functions[function_count].name) - 1] = '\0';
-
-        if (func_params && strlen(func_params) > 0) {
-            strncpy(functions[function_count].params, func_params, sizeof(functions[function_count].params) - 1);
-            functions[function_count].params[sizeof(functions[function_count].params) - 1] = '\0';
-        } else {
-            functions[function_count].params[0] = '\0';
-        }
-
-        if (func_body && strlen(func_body) > 0) {
-            strncpy(functions[function_count].body, func_body, sizeof(functions[function_count].body) - 1);
-            functions[function_count].body[sizeof(functions[function_count].body) - 1] = '\0';
-        } else {
-            functions[function_count].body[0] = '\0';
-        }
-
-        function_count++;
-    }
-}
-
-bool evaluate_condition(const char *condition) {
-    char *cond_copy = strdup(condition);
-    if (cond_copy == NULL) return false;
-
-    bool result = false;
-
-    if (strstr(cond_copy, "==") != NULL) {
-        char *left = strtok(cond_copy, "==");
-        char *right = strtok(NULL, "==");
-
-        if (left != NULL && right != NULL) {
-            left = strtok(left, " \t");
-            right = strtok(right, " \t");
-
-            if (left != NULL && right != NULL) {
-                if (right[0] == '"' && right[strlen(right)-1] == '"') {
-                    right++;
-                    right[strlen(right)-1] = '\0';
-                    
-                    char left_value[100] = "";
-                    for (int i = 0; i < variable_count; i++) {
-                        if (strcmp(variables[i].name, left) == 0) {
-                            if (strcmp(variables[i].type, "string") == 0) {
-                                strncpy(left_value, variables[i].value.str_value, sizeof(left_value)-1);
-                            } else if (strcmp(variables[i].type, "int") == 0) {
-                                snprintf(left_value, sizeof(left_value), "%d", variables[i].value.int_value);
-                            }
-                            break;
-                        }
-                    }
-                    
-                    if (strcmp(left_value, right) == 0) {
-                        result = true;
-                    }
-                }
-                else {
-                    int left_val = get_variable_int(left);
-                    int right_val = atoi(right);
-                    if (left_val == right_val) {
-                        result = true;
-                    }
-                }
-            }
-        }
-    }
-    else if (strstr(cond_copy, "!=") != NULL) {
-        char *left = strtok(cond_copy, "!=");
-        char *right = strtok(NULL, "!=");
-
-        if (left != NULL && right != NULL) {
-            left = strtok(left, " \t");
-            right = strtok(right, " \t");
-
-            if (left != NULL && right != NULL) {
-                int left_val = get_variable_int(left);
-                int right_val = atoi(right);
-                if (left_val != right_val) {
-                    result = true;
-                }
-            }
-        }
-    }
-
-    free(cond_copy);
-    return result;
-}
-
-int evaluate_expression(const char *expr) {
-    char expr_copy[100];
-    strncpy(expr_copy, expr, sizeof(expr_copy) - 1);
-    expr_copy[sizeof(expr_copy) - 1] = '\0';
-
-    char *token;
-    int result = 0;
-    char current_operator = '+';
-    int current_value;
+    if(n->type==NODE_IMPORT) { exec_import(vm, n->value); return mk_num(0); }
+    if(n->type==NODE_ASSIGN) { Value v=eval(vm, n->right); set_var(vm, n->value, v); return v; }
+    if(n->type==NODE_FUNC_DEF) { Value v={VAL_FUNC, .as.f=n}; set_global(vm, n->value, v); return mk_num(0); }
     
-    char clean_expr[100] = "";
-    char *src = expr_copy;
-    char *dst = clean_expr;
-    while (*src) {
-        if (*src != ' ' && *src != '\t') {
-            *dst++ = *src;
-        }
-        src++;
+    if(n->type==NODE_IF) {
+        Value c = eval(vm, n->left);
+        if(c.as.n) run_block(vm, n->right);
+        else if(n->extra) run_block(vm, n->extra);
+        return mk_num(0);
     }
-    *dst = '\0';
-
-    token = strtok(clean_expr, "+-*/");
-    while (token != NULL) {
-        char *operator_pos = clean_expr + (token - clean_expr) - 1;
-        if (operator_pos >= clean_expr) {
-            if (*operator_pos == '+') current_operator = '+';
-            else if (*operator_pos == '-') current_operator = '-';
-            else if (*operator_pos == '*') current_operator = '*';
-            else if (*operator_pos == '/') current_operator = '/';
+    if(n->type==NODE_WHILE) {
+        while(eval(vm, n->left).as.n) {
+            run_block(vm, n->right);
+            if(vm->is_ret) break;
         }
-
-        if (isdigit(token[0]) || (token[0] == '-' && isdigit(token[1]))) {
-            current_value = atoi(token);
-        } else {
-            current_value = get_variable_int(token);
-        }
-
-        switch (current_operator) {
-            case '+': result += current_value; break;
-            case '-': result -= current_value; break;
-            case '*': result *= current_value; break;
-            case '/': 
-                if (current_value != 0) result /= current_value; 
-                break;
-        }
-
-        token = strtok(NULL, "+-*/");
+        return mk_num(0);
     }
-    
-    return result;
+    if(n->type==NODE_FOR) {
+        eval(vm, n->left);
+        while(eval(vm, n->right).as.n) {
+            run_block(vm, n->extra->right); // body
+            if(vm->is_ret) break;
+            eval(vm, n->extra->left); // step
+        }
+        return mk_num(0);
+    }
+    if(n->type==NODE_RETURN) {
+        vm->is_ret = true;
+        vm->ret_val = n->left ? eval(vm, n->left) : mk_num(0);
+        return vm->ret_val;
+    }
+    if(n->type==NODE_FUNC_CALL) {
+        Value f = get_var(vm, n->value);
+        Value args[20]; int ac=0; ASTNode* a=n->left;
+        while(a) { args[ac++]=eval(vm, a->left); a=a->right; }
+        
+        vm->scopes[vm->sc_cnt].vars=malloc(sizeof(Var)*20); 
+        vm->scopes[vm->sc_cnt].cnt=0; vm->scopes[vm->sc_cnt].cap=20;
+        vm->sc_cnt++;
+        
+        ASTNode* p = f.as.f->left; int i=0;
+        while(p && i<ac) { set_var(vm, p->value, args[i++]); p=p->right; }
+        
+        run_block(vm, f.as.f->extra);
+        
+        Value ret = mk_num(0);
+        if (vm->is_ret) { ret = vm->ret_val; vm->is_ret = false; }
+        vm->sc_cnt--;
+        return ret;
+    }
+    if(n->type==NODE_BIN_OP) {
+        Value l=eval(vm,n->left), r=eval(vm,n->right);
+        int res = 0;
+        if(!strcmp(n->value,"+")) res = l.as.n+r.as.n;
+        else if(!strcmp(n->value,"-")) res = l.as.n-r.as.n;
+        else if(!strcmp(n->value,"*")) res = l.as.n*r.as.n;
+        else if(!strcmp(n->value,"/")) res = l.as.n/r.as.n;
+        else if(!strcmp(n->value,"<")) res = l.as.n < r.as.n;
+        else if(!strcmp(n->value,">")) res = l.as.n > r.as.n;
+        else if(!strcmp(n->value,"==")) res = l.as.n == r.as.n;
+        else if(!strcmp(n->value,"!=")) res = l.as.n != r.as.n;
+        return mk_num(res);
+    }
+    return mk_num(0);
 }
 
-char* parse_show_expression(const char *content) {
-    char *result = malloc(256);
-    if (!result) return NULL;
-    result[0] = '\0';
-
-    char content_copy[256];
-    strncpy(content_copy, content, sizeof(content_copy) - 1);
-    content_copy[sizeof(content_copy) - 1] = '\0';
-
-    char *pos = content_copy;
-    char temp[256] = "";
-    int temp_index = 0;
-
-    while (*pos) {
-        if (*pos == '"') {
-            pos++;
-            while (*pos && *pos != '"') {
-                temp[temp_index++] = *pos++;
-            }
-            if (*pos == '"') pos++;
-            temp[temp_index] = '\0';
-            strcat(result, temp);
-            temp_index = 0;
-            temp[0] = '\0';
-        }
-        else if (*pos == '+' && (pos == content_copy || *(pos-1) != 'e' && *(pos-1) != 'E')) {
-            pos++;
-        }
-        else if (*pos == '(') {
-            pos++;
-            char expr[100] = "";
-            int expr_index = 0;
-            int paren_count = 1;
-
-            while (*pos && paren_count > 0) {
-                if (*pos == '(') paren_count++;
-                else if (*pos == ')') paren_count--;
-                
-                if (paren_count > 0) {
-                    expr[expr_index++] = *pos;
-                }
-                pos++;
-            }
-            expr[expr_index] = '\0';
-            int math_result = evaluate_expression(expr);
-            char num_str[20];
-            snprintf(num_str, sizeof(num_str), "%d", math_result);
-            strcat(result, num_str);
-        }
-        else {
-            temp[temp_index++] = *pos++;
-            temp[temp_index] = '\0';
-
-            if (!*pos || *pos == '+' || *pos == '"') {
-                if (strchr(temp, '+') != NULL || strchr(temp, '-') != NULL || 
-                    strchr(temp, '*') != NULL || strchr(temp, '/') != NULL) {
-                    int math_result = evaluate_expression(temp);
-                    char num_str[20];
-                    snprintf(num_str, sizeof(num_str), "%d", math_result);
-                    strcat(result, num_str);
-                } else {
-                    const char *var_value = get_variable_string(temp);
-                    if (strlen(var_value) > 0) {
-                        strcat(result, var_value);
-                    } else {
-                        strcat(result, temp);
-                    }
-                }
-                temp_index = 0;
-                temp[0] = '\0';
-            }
-        }
-    }
-
-    if (temp_index > 0) {
-        temp[temp_index] = '\0';
-        if (strchr(temp, '+') != NULL || strchr(temp, '-') != NULL || 
-            strchr(temp, '*') != NULL || strchr(temp, '/') != NULL) {
-            int math_result = evaluate_expression(temp);
-            char num_str[20];
-            snprintf(num_str, sizeof(num_str), "%d", math_result);
-            strcat(result, num_str);
-        } else {
-            const char *var_value = get_variable_string(temp);
-            if (strlen(var_value) > 0) {
-                strcat(result, var_value);
+void run_block(void* vm_ptr, ASTNode* n) {
+    VM* vm = (VM*)vm_ptr;
+    while(n) {
+        if (vm->is_ret) return;
+        if (n->left) {
+            ASTNode* s = n->left;
+            if(s->type==NODE_SHOW) {
+                Value v=eval(vm, s->left);
+                if(v.type==VAL_NUM) printf("%d\n", v.as.n); else printf("%s\n", v.as.s);
             } else {
-                strcat(result, temp);
+                eval(vm, s);
             }
         }
-    }
-
-    return result;
-}
-
-void import_from_file(const char *filename, const char *elements) {
-    FILE *file = fopen(filename, "r");
-    if (file == NULL) {
-        perror("Error opening imported file");
-        return;
-    }
-
-    char line[256];
-    bool in_imported_block = false;
-
-    while (fgets(line, sizeof(line), file)) {
-        line[strcspn(line, "\n")] = 0;
-
-        if (strlen(line) == 0 || line[0] == '#') {
-            continue;
-        }
-
-        if (strstr(line, "func ") != NULL) {
-            char *func_name_start = strstr(line, "func ") + 5;
-            char *func_name_end = strchr(func_name_start, '(');
-            if (func_name_end != NULL) {
-                *func_name_end = '\0';
-
-                if (strstr(elements, func_name_start) != NULL) {
-                    in_imported_block = true;
-                }
-            }
-        }
-
-        if (in_imported_block) {
-            if (strstr(line, "}") != NULL) {
-                in_imported_block = false;
-            }
-        }
-    }
-
-    fclose(file);
-}
-
-void create_file(const char *filename) {
-    FILE *file = fopen(filename, "w");
-    if (file == NULL) {
-        perror("Error creating file");
-        return;
-    }
-    fclose(file);
-}
-
-void rm_file(const char *filename) {
-    if (remove(filename) != 0) {
-        perror("Error deleting file");
+        n = n->right;
     }
 }
 
-void clear_file_content(const char *filename) {
-    FILE *file = fopen(filename, "w");
-    if (file == NULL) {
-        perror("Error opening file for clearing");
-        return;
-    }
-    fclose(file);
-}
-
-void put_content_in_file(const char *content, const char *filename) {
-    FILE *file = fopen(filename, "a");
-    if (file == NULL) {
-        perror("Error opening file for writing");
-        return;
-    }
-
-    fprintf(file, "%s\n", content);
-    fclose(file);
-}
-
-char* read_file_content(const char *filename) {
-    FILE *file = fopen(filename, "r");
-    if (file == NULL) {
-        perror("Error opening file for reading");
-        return NULL;
-    }
-
-    fseek(file, 0, SEEK_END);
-    long file_size = ftell(file);
-    fseek(file, 0, SEEK_SET);
-
-    char *content = malloc(file_size + 1);
-    if (content == NULL) {
-        perror("Memory allocation failed");
-        fclose(file);
-        return NULL;
-    }
-
-    size_t bytes_read = fread(content, 1, file_size, file);
-    if (bytes_read < file_size) {
-        perror("Error reading file");
-        free(content);
-        fclose(file);
-        return NULL;
-    }
-
-    content[bytes_read] = '\0';
-    fclose(file);
-    return content;
-}
-
-void process_for_loop(const char *loop_line, FILE *file) {
-    char *var_start = strstr(loop_line, "for (") + 5;
-    char *var_end = strchr(var_start, ' ');
-    if (var_end == NULL) return;
-
-    *var_end = '\0';
-    char loop_var[50];
-    strncpy(loop_var, var_start, sizeof(loop_var) - 1);
-    loop_var[sizeof(loop_var) - 1] = '\0';
-
-    if (strstr(var_end + 1, "in range[") != NULL) {
-        char *range_start = strstr(var_end + 1, "in range[") + 9;
-        char *range_end = strchr(range_start, ']');
-        if (range_end != NULL) {
-            *range_end = '\0';
-            int range_value = atoi(range_start);
-
-            char loop_body[500] = "";
-            char line[256];
-            bool in_loop_body = true;
-
-            while (in_loop_body && fgets(line, sizeof(line), file)) {
-                line[strcspn(line, "\n")] = 0;
-
-                if (strstr(line, "}") != NULL) {
-                    in_loop_body = false;
-                    break;
-                }
-
-                if (strlen(loop_body) + strlen(line) + 2 < sizeof(loop_body)) {
-                    strcat(loop_body, line);
-                    strcat(loop_body, "\n");
-                }
-            }
-
-            for (int i = 0; i < range_value; i++) {
-                set_variable(loop_var, i, "int");
-            }
-        }
-    }
-}
-
-void process_simple_assignment(const char *line) {
-    char *equals_pos = strchr(line, '=');
-    if (equals_pos != NULL) {
-        *equals_pos = '\0';
-        char *var_name = line;
-        char *value_str = equals_pos + 1;
-        
-        while (*var_name == ' ' || *var_name == '\t') var_name++;
-        char *var_end = var_name + strlen(var_name) - 1;
-        while (var_end > var_name && (*var_end == ' ' || *var_end == '\t')) var_end--;
-        *(var_end + 1) = '\0';
-        
-        while (*value_str == ' ' || *value_str == '\t') value_str++;
-        char *value_end = value_str + strlen(value_str) - 1;
-        while (value_end > value_str && (*value_end == ' ' || *value_end == '\t')) value_end--;
-        *(value_end + 1) = '\0';
-        
-        if (strlen(value_str) > 0) {
-            if (strchr(value_str, '+') != NULL || strchr(value_str, '-') != NULL || 
-                strchr(value_str, '*') != NULL || strchr(value_str, '/') != NULL) {
-                int result = evaluate_expression(value_str);
-                set_variable(var_name, result, "int");
-            } else {
-                bool is_number = true;
-                for (char *p = value_str; *p; p++) {
-                    if (!isdigit(*p) && *p != '-') {
-                        is_number = false;
-                        break;
-                    }
-                }
-                
-                if (is_number) {
-                    set_variable(var_name, atoi(value_str), "int");
-                } else {
-                    set_variable_string(var_name, value_str);
-                }
-            }
-        }
-    }
-}
-
-void execute_function_body(const char *body, const char *params, const char *args) {
-    char body_copy[500];
-    strncpy(body_copy, body, sizeof(body_copy) - 1);
-    body_copy[sizeof(body_copy) - 1] = '\0';
-
-    Variable saved_variables[100];
-    int saved_variable_count = variable_count;
-    memcpy(saved_variables, variables, sizeof(variables));
-
-    if (params && args && strlen(params) > 0 && strlen(args) > 0) {
-        char params_copy[100], args_copy[100];
-        strncpy(params_copy, params, sizeof(params_copy) - 1);
-        strncpy(args_copy, args, sizeof(args_copy) - 1);
-        params_copy[sizeof(params_copy) - 1] = '\0';
-        args_copy[sizeof(args_copy) - 1] = '\0';
-        
-        char *param_ptr = params_copy;
-        char *arg_ptr = args_copy;
-        
-        while (*param_ptr && *arg_ptr) {
-            char param_name[50] = "";
-            char *param_start = param_ptr;
-            while (*param_ptr && *param_ptr != ',') param_ptr++;
-            strncpy(param_name, param_start, param_ptr - param_start);
-            if (*param_ptr == ',') param_ptr++;
-            
-            char arg_value[50] = "";
-            char *arg_start = arg_ptr;
-            while (*arg_ptr && *arg_ptr != ',') arg_ptr++;
-            strncpy(arg_value, arg_start, arg_ptr - arg_start);
-            if (*arg_ptr == ',') arg_ptr++;
-            
-            char *trimmed_param = param_name;
-            while (*trimmed_param == ' ' || *trimmed_param == '\t') trimmed_param++;
-            char *param_end = trimmed_param + strlen(trimmed_param) - 1;
-            while (param_end > trimmed_param && (*param_end == ' ' || *param_end == '\t')) param_end--;
-            *(param_end + 1) = '\0';
-            
-            char *trimmed_arg = arg_value;
-            while (*trimmed_arg == ' ' || *trimmed_arg == '\t') trimmed_arg++;
-            char *arg_end = trimmed_arg + strlen(trimmed_arg) - 1;
-            while (arg_end > trimmed_arg && (*arg_end == ' ' || *arg_end == '\t')) arg_end--;
-            *(arg_end + 1) = '\0';
-            
-            if (trimmed_arg[0] == '"' && trimmed_arg[strlen(trimmed_arg)-1] == '"') {
-                memmove(trimmed_arg, trimmed_arg + 1, strlen(trimmed_arg) - 2);
-                trimmed_arg[strlen(trimmed_arg) - 2] = '\0';
-                set_variable_string(trimmed_param, trimmed_arg);
-            } else {
-                if (strchr(trimmed_arg, '+') != NULL || strchr(trimmed_arg, '-') != NULL || 
-                    strchr(trimmed_arg, '*') != NULL || strchr(trimmed_arg, '/') != NULL) {
-                    int result = evaluate_expression(trimmed_arg);
-                    set_variable(trimmed_param, result, "int");
-                } else {
-                    bool is_number = true;
-                    for (char *p = trimmed_arg; *p; p++) {
-                        if (!isdigit(*p) && *p != '-') {
-                            is_number = false;
-                            break;
-                        }
-                    }
-                    
-                    if (is_number) {
-                        set_variable(trimmed_param, atoi(trimmed_arg), "int");
-                    } else {
-                        int value = get_variable_int(trimmed_arg);
-                        set_variable(trimmed_param, value, "int");
-                    }
-                }
-            }
-            
-            if (!*param_ptr || !*arg_ptr) break;
-        }
-    }
-
-    char *body_line = strtok(body_copy, "\n");
-    while (body_line != NULL) {
-        char temp_line[256];
-        strncpy(temp_line, body_line, sizeof(temp_line) - 1);
-        temp_line[sizeof(temp_line) - 1] = '\0';
-
-        char *line_start = temp_line;
-        while (*line_start == ' ' || *line_start == '\t') line_start++;
-
-        if (strchr(line_start, '=') != NULL && 
-            strstr(line_start, "get_inp") == NULL && 
-            strstr(line_start, "get_byte") == NULL && 
-            strstr(line_start, "read_file_content") == NULL) {
-            
-            process_simple_assignment(line_start);
-        }
-        else if (strstr(line_start, "show(") != NULL) {
-            char *start = strchr(line_start, '(');
-            if (start != NULL) {
-                start++;
-                
-                int show_paren_count = 1;
-                char *show_end = start;
-                while (*show_end && show_paren_count > 0) {
-                    if (*show_end == '(') show_paren_count++;
-                    else if (*show_end == ')') show_paren_count--;
-                    show_end++;
-                }
-                
-                if (show_paren_count == 0) {
-                    show_end--;
-                    
-                    char show_content[256];
-                    int content_len = show_end - start;
-                    strncpy(show_content, start, content_len);
-                    show_content[content_len] = '\0';
-                    
-                    char *output = parse_show_expression(show_content);
-                    if (output) {
-                        show(output);
-                        free(output);
-                    }
-                }
-            }
-        }
-
-        body_line = strtok(NULL, "\n");
-    }
-
-    variable_count = saved_variable_count;
-    memcpy(variables, saved_variables, sizeof(variables));
-}
-
-void interpret_df_file(const char *filename) {
-    FILE *file = fopen(filename, "r");
-    if (file == NULL) {
-        perror("Error opening file");
-        return;
-    }
-
-    char line[256];
-    bool in_if_block = false;
-    bool if_condition_met = false;
-    bool in_loop_block = false;
-    char loop_condition[256] = "";
-    bool in_class_block = false;
-    char current_class[50] = "";
-    bool in_method_block = false;
-    char current_method[50] = "";
-    char method_params[100] = "";
-    char method_body[500] = "";
-
-    variable_count = 0;
-    class_count = 0;
-    function_count = 0;
-    object_list_count = 0;
-
-    fseek(file, 0, SEEK_SET);
-    while (fgets(line, sizeof(line), file)) {
-        line[strcspn(line, "\n")] = 0;
-
-        if (strlen(line) == 0 || line[0] == '#') {
-            continue;
-        }
-
-        if (strstr(line, "func ") == line && strchr(line, '(') != NULL && strchr(line, ')') != NULL && 
-            !in_class_block) {
-            
-            char *func_start = strstr(line, "func ") + 5;
-            
-            char *open_paren = strchr(func_start, '(');
-            if (open_paren != NULL) {
-                int name_length = open_paren - func_start;
-                char func_name[50] = "";
-                strncpy(func_name, func_start, name_length);
-                func_name[name_length] = '\0';
-                
-                char *trimmed_name = func_name;
-                while (*trimmed_name == ' ' || *trimmed_name == '\t') trimmed_name++;
-                char *name_end = trimmed_name + strlen(trimmed_name) - 1;
-                while (name_end > trimmed_name && (*name_end == ' ' || *name_end == '\t')) name_end--;
-                *(name_end + 1) = '\0';
-                
-                char *close_paren = strchr(open_paren, ')');
-                if (close_paren != NULL) {
-                    int params_length = close_paren - open_paren - 1;
-                    char func_params[100] = "";
-                    if (params_length > 0) {
-                        strncpy(func_params, open_paren + 1, params_length);
-                        func_params[params_length] = '\0';
-                    }
-                    
-                    char func_body[500] = "";
-                    bool in_func_body = true;
-                    int brace_count = 1;
-                    
-                    while (in_func_body && fgets(line, sizeof(line), file)) {
-                        line[strcspn(line, "\n")] = 0;
-
-                        char *brace_pos = line;
-                        while ((brace_pos = strchr(brace_pos, '{')) != NULL) {
-                            brace_count++;
-                            brace_pos++;
-                        }
-                        
-                        brace_pos = line;
-                        while ((brace_pos = strchr(brace_pos, '}')) != NULL) {
-                            brace_count--;
-                            brace_pos++;
-                            if (brace_count == 0) {
-                                in_func_body = false;
-                                break;
-                            }
-                        }
-
-                        if (in_func_body) {
-                            if (strlen(func_body) + strlen(line) + 2 < sizeof(func_body)) {
-                                strcat(func_body, line);
-                                strcat(func_body, "\n");
-                            }
-                        }
-                    }
-
-                    add_function(trimmed_name, func_params, func_body);
-                }
-            }
-        }
-    }
-
-    fseek(file, 0, SEEK_SET);
-    while (fgets(line, sizeof(line), file)) {
-        line[strcspn(line, "\n")] = 0;
-
-        if (strlen(line) == 0 || line[0] == '#') {
-            continue;
-        }
-
-        if ((strstr(line, "func ") == line && strchr(line, '(') != NULL && strchr(line, ')') != NULL) ||
-            (strstr(line, "class ") != NULL && strchr(line, '(') != NULL && strchr(line, ')') != NULL)) {
-            while (fgets(line, sizeof(line), file)) {
-                line[strcspn(line, "\n")] = 0;
-                if (strstr(line, "}") != NULL) {
-                    break;
-                }
-            }
-            continue;
-        }
-
-        if (strchr(line, '(') != NULL && strchr(line, ')') != NULL && 
-            strstr(line, "func ") != line) {
-            
-            char *open_paren = strchr(line, '(');
-            if (open_paren != NULL) {
-                int name_length = open_paren - line;
-                char func_name[50] = "";
-                strncpy(func_name, line, name_length);
-                func_name[name_length] = '\0';
-                
-                char *trimmed_name = func_name;
-                while (*trimmed_name == ' ' || *trimmed_name == '\t') trimmed_name++;
-                char *name_end = trimmed_name + strlen(trimmed_name) - 1;
-                while (name_end > trimmed_name && (*name_end == ' ' || *name_end == '\t')) name_end--;
-                *(name_end + 1) = '\0';
-                
-                char *close_paren = strchr(open_paren, ')');
-                if (close_paren != NULL) {
-                    int args_length = close_paren - open_paren - 1;
-                    char func_args[100] = "";
-                    if (args_length > 0) {
-                        strncpy(func_args, open_paren + 1, args_length);
-                        func_args[args_length] = '\0';
-                    }
-
-                    if (strcmp(trimmed_name, "show") == 0) {
-                        char *output = parse_show_expression(func_args);
-                        if (output) {
-                            show(output);
-                            free(output);
-                        }
-                    }
-                    else {
-                        bool function_found = false;
-                        for (int i = 0; i < function_count; i++) {
-                            if (strcmp(functions[i].name, trimmed_name) == 0) {
-                                execute_function_body(functions[i].body, functions[i].params, func_args);
-                                function_found = true;
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-            continue;
-        }
-
-        if (strchr(line, '=') != NULL && 
-            strstr(line, "get_inp") == NULL && 
-            strstr(line, "get_byte") == NULL && 
-            strstr(line, "read_file_content") == NULL) {
-            
-            process_simple_assignment(line);
-            continue;
-        }
-    }
-
-    fclose(file);
-}
-
-int main(int argc, char *argv[]) {
-    if (argc < 2) {
-        printf("Usage: %s <filename.df>\n", argv[0]);
-        return 1;
-    }
-
-    interpret_df_file(argv[1]);
-
-    for (int i = 0; i < object_list_count; i++) {
-        clear_object_list(object_lists[i]);
-    }
-
-    variable_count = 0;
-    class_count = 0;
-    object_list_count = 0;
-    function_count = 0;
-
+int main(int c, char** v) {
+    if(c<2) { printf("Usage: ./main <file.df>\n"); return 1; }
+    char* s=read_file(v[1]);
+    if(!s) { printf("Could not open %s\n", v[1]); return 1; }
+    run_block(create_vm(), parse_prog(create_parser(create_lexer(s))));
     return 0;
 }
